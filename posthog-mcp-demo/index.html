@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PostHog MCP #73653 — resources flood</title>
+  <style>
+    :root {
+      font-family: system-ui, sans-serif;
+      line-height: 1.45;
+      color: #1a1a1a;
+      background: #f6f6f6;
+    }
+    body { max-width: 960px; margin: 0 auto; padding: 1.25rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+    .warn {
+      background: #fff3cd;
+      border: 1px solid #e6c200;
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      margin: 1rem 0;
+    }
+    .warn strong { color: #7a5d00; }
+    .controls { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 1rem 0; }
+    button {
+      padding: 0.5rem 0.85rem;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button:hover { background: #eee; }
+    button[aria-pressed="true"] { border-color: #e56; background: #fee; }
+    table { width: 100%; border-collapse: collapse; background: #fff; margin: 1rem 0; }
+    th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #ddd; }
+    th { background: #fafafa; }
+    .resources {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      max-height: 320px;
+      overflow: auto;
+      font-size: 0.82rem;
+      font-family: ui-monospace, monospace;
+    }
+    .resources div { padding: 0.35rem 0.75rem; border-bottom: 1px solid #eee; }
+    .meta { color: #666; font-size: 0.85rem; word-break: break-all; }
+    .err { color: #b00020; white-space: pre-wrap; }
+    #status { min-height: 1.25rem; color: #555; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>MCP resources flood (#73653)</h1>
+  <p class="meta">
+    Calls <code>/api/snapshot</code>, which connects to PostHog MCP with the SDK and paginates
+    <code>tools/list</code> + <code>resources/list</code>.
+  </p>
+
+  <div class="warn" role="note">
+    <strong>Known bug (today):</strong>
+    <code>?resources=none</code> is supposed to disable context-mill / @ autocomplete resources,
+    but the server still advertises and lists them — expect ~<strong>316</strong> resources for
+    both <em>Default</em> and <em>resources=none</em> until #73653 is fixed.
+  </div>
+
+  <div class="controls">
+    <button type="button" data-variant="default" aria-pressed="true">Default URL</button>
+    <button type="button" data-variant="resources-none">?resources=none</button>
+    <button type="button" data-variant="mode-tools">?mode=tools</button>
+  </div>
+
+  <div id="status">Click a variant to fetch a snapshot.</div>
+
+  <table aria-label="Counts">
+    <thead>
+      <tr>
+        <th>Variant</th>
+        <th>Tools</th>
+        <th>Resources</th>
+        <th>MCP URL</th>
+      </tr>
+    </thead>
+    <tbody id="counts-body">
+      <tr><td colspan="4" class="meta">No data yet.</td></tr>
+    </tbody>
+  </table>
+
+  <h2 style="font-size: 1rem;">Breakdown by scheme (top buckets)</h2>
+  <table aria-label="Scheme breakdown">
+    <thead><tr><th>Scheme / host</th><th>Count</th></tr></thead>
+    <tbody id="scheme-body"><tr><td colspan="2" class="meta">—</td></tr></tbody>
+  </table>
+
+  <h2 style="font-size: 1rem;">First 20 resources (as @ autocomplete would show)</h2>
+  <div class="resources" id="resource-list"><div class="meta">—</div></div>
+
+  <script>
+    const countsBody = document.getElementById('counts-body')
+    const schemeBody = document.getElementById('scheme-body')
+    const resourceList = document.getElementById('resource-list')
+    const statusEl = document.getElementById('status')
+    let activeVariant = 'default'
+
+    document.querySelectorAll('button[data-variant]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        activeVariant = btn.dataset.variant
+        document.querySelectorAll('button[data-variant]').forEach((b) => {
+          b.setAttribute('aria-pressed', b === btn ? 'true' : 'false')
+        })
+        loadSnapshot(activeVariant)
+      })
+    })
+
+    async function loadSnapshot(variant) {
+      statusEl.textContent = 'Connecting to MCP…'
+      statusEl.className = ''
+      try {
+        const res = await fetch(`/api/snapshot?variant=${encodeURIComponent(variant)}`)
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || res.statusText)
+        render(data, variant)
+        statusEl.textContent = `Snapshot OK (${new Date().toLocaleTimeString()})`
+      } catch (e) {
+        statusEl.textContent = String(e.message || e)
+        statusEl.className = 'err'
+      }
+    }
+
+    function render(data, variant) {
+      countsBody.innerHTML = `
+        <tr>
+          <td><code>${variant}</code></td>
+          <td>${data.toolCount}</td>
+          <td>${data.resourceCount}</td>
+          <td class="meta">${data.url}</td>
+        </tr>`
+
+      const entries = Object.entries(data.breakdownByScheme || {}).sort((a, b) => b[1] - a[1])
+      schemeBody.innerHTML = entries.length
+        ? entries.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')
+        : '<tr><td colspan="2" class="meta">No resources</td></tr>'
+
+      const rows = data.first20Resources || []
+      resourceList.innerHTML = rows.length
+        ? rows.map((r) => `<div>@ ${escapeHtml(r.name)} <span class="meta">${escapeHtml(r.uri)}</span></div>`).join('')
+        : '<div class="meta">No resources returned</div>'
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+    }
+  </script>
+</body>
+</html>
